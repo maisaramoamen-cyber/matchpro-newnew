@@ -471,7 +471,7 @@ app.get('/health', (req, res) => {
   }
   res.json({ status:'ok', version:'1.0.0', env:'sandbox', db: counts, timestamp: new Date().toISOString() })
 })
-app.get('/api/health', (req, res) => res.redirect('/health'))
+app.get('/api/health', (req, res) => { const counts = { messages: db.prepare('SELECT COUNT(*) c FROM messages').get().c, supply: db.prepare('SELECT COUNT(*) c FROM supply').get().c, demand: db.prepare('SELECT COUNT(*) c FROM demand').get().c, matches: db.prepare('SELECT COUNT(*) c FROM matches').get().c }; res.json({ status:'ok', version:'1.0.0', env:'sandbox', db: counts, timestamp: new Date().toISOString() }) })
 
 // Auth
 app.post('/api/auth/login', (req, res) => {
