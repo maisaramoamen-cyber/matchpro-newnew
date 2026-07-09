@@ -443,8 +443,26 @@ baileysEvents.on('qr', ({ qr }) => {
   io.emit('baileys_qr', { qr, timestamp: new Date().toISOString() })
 })
 
+// ── Monitored groups helper ────────────────────────────────────────────────
+function getMonitoredGroupIds() {
+  try {
+    const row = db.prepare("SELECT value FROM settings WHERE key='monitored_group_ids'").get()
+    if (!row || !row.value) return null // null = monitor ALL groups
+    const ids = JSON.parse(row.value)
+    return Array.isArray(ids) && ids.length > 0 ? ids : null
+  } catch { return null }
+}
+
 baileysEvents.on('message', async (msg) => {
   try {
+    // ── Monitored-group filter ──────────────────────────────────────────────
+    const monitoredIds = getMonitoredGroupIds()
+    if (monitoredIds && msg.group_id && !monitoredIds.includes(msg.group_id)) {
+      // Message from a non-monitored group — skip SACRED processing, log only
+      console.log(`[Baileys] ⏭️  Skipping non-monitored group: ${msg.group_id}`)
+      return
+    }
+
     // Save real WA message to SQLite
     const id = 'wa_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7)
     const type = msg.body && /بيع|للبيع|شقة|فيلا|ارض|محل|اوفيس|تاون|دوبلكس/i.test(msg.body) ? 'supply'
@@ -774,6 +792,49 @@ app.post('/api/baileys/send-message', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }) }
 })
 
+// ── Monitored groups (SACRED engine filter) ────────────────────────────────
+// GET: returns current monitored group ids + names (null = monitor ALL)
+app.get('/api/baileys/monitored-groups', requireAuth, async (req, res) => {
+  try {
+    const row = db.prepare("SELECT value FROM settings WHERE key='monitored_group_ids'").get()
+    let monitoredIds = null
+    if (row && row.value) {
+      try { monitoredIds = JSON.parse(row.value) } catch { monitoredIds = null }
+    }
+    // Optionally enrich with group metadata if Baileys is connected
+    let groups = []
+    try { groups = await getGroups() } catch { /* offline — return ids only */ }
+    const enriched = (monitoredIds || []).map(id => {
+      const g = groups.find(g => g.id === id)
+      return { id, name: g?.subject || g?.name || id, participants: g?.participants?.length || 0, monitored: true }
+    })
+    res.json({
+      ok: true,
+      monitor_all: monitoredIds === null,
+      monitored_ids: monitoredIds || [],
+      monitored_groups: enriched,
+      total_groups: groups.length,
+    })
+  } catch(e) { res.status(500).json({ error: e.message }) }
+})
+
+// POST: { group_ids: ['id1','id2',...] } — empty array = monitor ALL
+app.post('/api/baileys/monitored-groups', requireAuth, (req, res) => {
+  try {
+    const { group_ids } = req.body || {}
+    if (!Array.isArray(group_ids)) return res.status(400).json({ error: 'group_ids must be an array' })
+    const value = group_ids.length === 0 ? null : JSON.stringify(group_ids)
+    if (value === null) {
+      db.prepare("DELETE FROM settings WHERE key='monitored_group_ids'").run()
+    } else {
+      db.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES('monitored_group_ids',?)").run(value)
+    }
+    // Emit updated config via Socket.IO so Flutter syncs live
+    io.emit('monitored_groups_updated', { monitor_all: value === null, monitored_ids: group_ids })
+    res.json({ ok: true, monitor_all: value === null, monitored_ids: group_ids, message: value === null ? 'Monitoring ALL groups' : `Monitoring ${group_ids.length} group(s)` })
+  } catch(e) { res.status(500).json({ error: e.message }) }
+})
+
 // Brokers
 app.get('/api/brokers', requireAuth, (req, res) => {
   try {
@@ -845,6 +906,14 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => console.log(`[Socket.IO] Client disconnected: ${socket.id}`))
   socket.on('ping', () => socket.emit('pong', { timestamp: new Date().toISOString() }))
+
+  // Send current monitored groups config on connect
+  try {
+    const mgRow = db.prepare("SELECT value FROM settings WHERE key='monitored_group_ids'").get()
+    let monitoredIds = null
+    if (mgRow && mgRow.value) { try { monitoredIds = JSON.parse(mgRow.value) } catch { monitoredIds = null } }
+    socket.emit('monitored_groups_updated', { monitor_all: monitoredIds === null, monitored_ids: monitoredIds || [] })
+  } catch { /* ignore */ }
 })
 
 // Auto-emit stats every 30s
