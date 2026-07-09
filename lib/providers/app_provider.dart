@@ -53,6 +53,17 @@ class AppProvider extends ChangeNotifier {
   bool _socketConnected = false;
   bool get socketConnected => _socketConnected;
 
+  // ── Baileys WA state ───────────────────────────────────────────────────────
+  Map<String, dynamic> _baileysState = {'connected': false, 'state': 'idle', 'qrAvailable': false};
+  String? _baileysQrBase64;  // base64 PNG data URI from socket event or API poll
+  bool _baileysLoading = false;
+
+  Map<String, dynamic> get baileysState => _baileysState;
+  String? get baileysQrBase64 => _baileysQrBase64;
+  bool get baileysLoading => _baileysLoading;
+  bool get baileysConnected => _baileysState['connected'] == true;
+  String get baileysWaState => _baileysState['state']?.toString() ?? 'idle';
+
   // ── CPI Assets (5 hardcoded assets — merged with backend match counts) ─────
   List<CPIAsset> _assets = const [
     CPIAsset(
@@ -318,6 +329,8 @@ class AppProvider extends ChangeNotifier {
       try {
         final m = data as Map<String, dynamic>;
         final connected = m['connected'] as bool? ?? false;
+        _baileysState = Map<String, dynamic>.from(m);
+        if (connected) _baileysQrBase64 = null; // clear QR once connected
         if (_stats != null) {
           _stats = DashboardStats(
             supplyCount: _stats!.supplyCount,
@@ -329,10 +342,31 @@ class AppProvider extends ChangeNotifier {
             whatsappConnected: connected,
             lastSync: _stats!.lastSync,
           );
+        }
+        notifyListeners();
+      } catch (e) {
+        if (kDebugMode) debugPrint('wa_status parse error: $e');
+      }
+    });
+
+    // ── BAILEYS QR — new QR code generated, show in WA screen ─────────────
+    _socket!.on('baileys_qr', (data) {
+      if (kDebugMode) debugPrint('Socket.IO baileys_qr received');
+      try {
+        final m = data as Map<String, dynamic>;
+        final qr = m['qr'] as String?;
+        if (qr != null && qr.isNotEmpty) {
+          _baileysQrBase64 = qr;
+          _baileysState = {
+            ..._baileysState,
+            'connected': false,
+            'state': 'qr_ready',
+            'qrAvailable': true,
+          };
           notifyListeners();
         }
       } catch (e) {
-        if (kDebugMode) debugPrint('wa_status parse error: $e');
+        if (kDebugMode) debugPrint('baileys_qr parse error: $e');
       }
     });
 
@@ -483,5 +517,56 @@ class AppProvider extends ChangeNotifier {
   void dispose() {
     _disconnectSocket();
     super.dispose();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // BAILEYS ACTIONS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /// Fetch Baileys status + QR from API (called on WA screen open)
+  Future<void> fetchBaileysStatus() async {
+    _baileysLoading = true;
+    notifyListeners();
+    try {
+      final data = await ApiService.getBaileysStatus();
+      _baileysState = data;
+      final qr = data['qrBase64'] as String?;
+      if (qr != null && qr.isNotEmpty) _baileysQrBase64 = qr;
+      if (data['connected'] == true) _baileysQrBase64 = null;
+    } catch (e) {
+      if (kDebugMode) debugPrint('fetchBaileysStatus error: $e');
+    } finally {
+      _baileysLoading = false;
+      notifyListeners();
+    }
+  }
+
+  /// Start Baileys connector
+  Future<bool> startBaileys() async {
+    _baileysLoading = true;
+    notifyListeners();
+    final ok = await ApiService.startBaileys();
+    // Refresh status after 3s to pick up new QR
+    await Future.delayed(const Duration(seconds: 3));
+    await fetchBaileysStatus();
+    return ok;
+  }
+
+  /// Stop Baileys connector
+  Future<bool> stopBaileys() async {
+    final ok = await ApiService.stopBaileys();
+    await fetchBaileysStatus();
+    return ok;
+  }
+
+  /// Reset session — forces new QR
+  Future<bool> resetBaileys() async {
+    _baileysLoading = true;
+    _baileysQrBase64 = null;
+    notifyListeners();
+    final ok = await ApiService.resetBaileys();
+    await Future.delayed(const Duration(seconds: 3));
+    await fetchBaileysStatus();
+    return ok;
   }
 }

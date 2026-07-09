@@ -5,6 +5,7 @@ import '../providers/app_provider.dart';
 import '../models/models.dart';
 import '../config/app_config.dart';
 import '../utils/formatters.dart';
+import 'wa_screen.dart';
 
 // ════════════════════════════════════════════════════════════════════════════
 // MORE TAB (hub)
@@ -939,15 +940,7 @@ class _SettingsTabState extends State<SettingsTab> {
   bool _autoSync = true;
   bool _waWebhook = true;
 
-  // WhatsApp groups (demo)
-  final _waGroups = [
-    {'name': 'مدينتي — وسطاء 1', 'active': true, 'messages': 4821},
-    {'name': 'مدينتي — وسطاء 2', 'active': true, 'messages': 3102},
-    {'name': 'نور سيتي الرئيسي', 'active': true, 'messages': 2987},
-    {'name': 'التجمع الخامس VIP', 'active': true, 'messages': 2344},
-    {'name': 'الرحاب + الشروق', 'active': false, 'messages': 1890},
-    {'name': 'الشيخ زايد فلل', 'active': true, 'messages': 1456},
-  ];
+  // WhatsApp: groups now fetched live from Baileys — see WaScreen
 
   @override
   void dispose() {
@@ -988,7 +981,7 @@ class _SettingsTabState extends State<SettingsTab> {
             _section('حالة الاتصال', [
               _statusRow('السيرفر', _editingUrl ? _urlCtrl.text : AppConfig.baseUrl, true),
               _statusRow('Socket.IO', 'v4 — real-time', prov.socketConnected || AppConfig.demoMode),
-              _statusRow('واتساب', '${_waGroups.where((g) => g['active'] == true).length} مجموعة نشطة', true),
+              _statusRow('واتساب', prov.baileysConnected ? 'متصل ✅' : (prov.baileysWaState == 'qr_ready' ? 'QR جاهز للمسح' : 'غير متصل'), prov.baileysConnected),
               _statusRow('وضع العرض', AppConfig.demoMode ? 'مفعّل — بيانات تجريبية' : 'مطفأ — بيانات حقيقية',
                   !AppConfig.demoMode),
             ]),
@@ -1354,103 +1347,166 @@ class _SettingsTabState extends State<SettingsTab> {
   }
 
   Widget _whatsappSection() {
-    final activeCount = _waGroups.where((g) => g['active'] == true).length;
+    return Consumer<AppProvider>(
+      builder: (ctx, prov, _) {
+        final connected = prov.baileysConnected;
+        final state = prov.baileysWaState;
 
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(AppColors.border)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-            child: Row(
-              children: [
-                const Icon(Icons.chat_rounded, size: 15, color: Color(AppColors.whatsapp)),
-                const SizedBox(width: 6),
-                const Expanded(
-                  child: Text('مجموعات واتساب',
-                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Color(AppColors.muted)),
-                      textDirection: TextDirection.rtl),
-                ),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: const Color(AppColors.live).withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Text('$activeCount نشط',
-                      style: const TextStyle(
-                          fontSize: 11, color: Color(AppColors.live), fontWeight: FontWeight.bold)),
-                ),
-              ],
-            ),
+        final Color dotColor;
+        final String statusLabel;
+        final Color statusBg;
+
+        switch (state) {
+          case 'open':
+          case 'connected':
+            dotColor = const Color(AppColors.live);
+            statusLabel = 'متصل ✅';
+            statusBg = const Color(0xFFF0FDF4);
+            break;
+          case 'qr_ready':
+            dotColor = const Color(AppColors.warm);
+            statusLabel = 'في انتظار المسح QR';
+            statusBg = const Color(0xFFFFFBEB);
+            break;
+          default:
+            dotColor = const Color(AppColors.muted);
+            statusLabel = 'غير متصل';
+            statusBg = const Color(AppColors.bg);
+        }
+
+        return Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: const Color(AppColors.border)),
           ),
-          const Divider(height: 1),
-          ..._waGroups.asMap().entries.map((e) {
-            final group = e.value;
-            final isActive = group['active'] as bool;
-            return Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              decoration: BoxDecoration(
-                border: e.key > 0
-                    ? const Border(top: BorderSide(color: Color(AppColors.border)))
-                    : null,
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    width: 8, height: 8,
-                    decoration: BoxDecoration(
-                      color: isActive ? const Color(AppColors.live) : const Color(AppColors.border),
-                      shape: BoxShape.circle,
+          child: Column(
+            children: [
+              // Header
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 10),
+                child: Row(
+                  children: [
+                    const Icon(Icons.chat_rounded,
+                        size: 16, color: Color(AppColors.whatsapp)),
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text('واتساب — Baileys',
+                          style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.bold,
+                              color: Color(AppColors.text)),
+                          textDirection: TextDirection.rtl),
                     ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(group['name'] as String,
-                            style: TextStyle(
-                                fontSize: 13,
-                                color: isActive ? const Color(AppColors.text) : const Color(AppColors.muted),
-                                fontWeight: isActive ? FontWeight.w500 : FontWeight.normal),
-                            textDirection: TextDirection.rtl),
-                        Text('${group['messages']} رسالة محللة',
-                            style: const TextStyle(fontSize: 10, color: Color(AppColors.muted)),
-                            textDirection: TextDirection.rtl),
-                      ],
+                    // Live status badge
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: statusBg,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: dotColor.withValues(alpha: 0.3)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                              width: 6,
+                              height: 6,
+                              decoration: BoxDecoration(
+                                  color: dotColor, shape: BoxShape.circle)),
+                          const SizedBox(width: 5),
+                          Text(statusLabel,
+                              style: TextStyle(
+                                  fontSize: 10,
+                                  color: dotColor,
+                                  fontWeight: FontWeight.bold)),
+                        ],
+                      ),
                     ),
-                  ),
-                  Switch(
-                    value: isActive,
-                    onChanged: (v) {
-                      setState(() => group['active'] = v);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(
-                            v
-                                ? '✅ ${group['name']} — تم التفعيل'
-                                : '⏸️ ${group['name']} — تم الإيقاف',
-                            textDirection: TextDirection.rtl,
-                          ),
-                          behavior: SnackBarBehavior.floating,
-                          backgroundColor: v ? const Color(AppColors.live) : const Color(AppColors.muted),
-                        ),
-                      );
-                    },
-                    activeThumbColor: const Color(AppColors.whatsapp),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            );
-          }),
-        ],
-      ),
+              const Divider(height: 1),
+              // Info rows
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                child: Column(
+                  children: [
+                    _infoRowCompact('المحرك', 'Baileys v7 — Native Multi-Device'),
+                    const SizedBox(height: 6),
+                    _infoRowCompact(
+                        'الحالة',
+                        connected
+                            ? (prov.baileysState['phone'] != null
+                                ? '📞 ${prov.baileysState['phone']}'
+                                : 'متصل')
+                            : state == 'qr_ready'
+                                ? 'QR جاهز للمسح'
+                                : 'غير متصل'),
+                    const SizedBox(height: 6),
+                    _infoRowCompact('وضع التشغيل', 'تلقائي عند البدء'),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+              // Open WA screen button
+              InkWell(
+                borderRadius:
+                    const BorderRadius.vertical(bottom: Radius.circular(13)),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const WaScreen()),
+                ).then((_) {
+                  // Refresh status when returning from WA screen
+                  context.read<AppProvider>().fetchBaileysStatus();
+                }),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        connected
+                            ? Icons.settings_outlined
+                            : Icons.qr_code_scanner_outlined,
+                        size: 16,
+                        color: const Color(AppColors.navy),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        connected ? 'إدارة واتساب' : 'ربط واتساب / مسح QR',
+                        style: const TextStyle(
+                            fontSize: 13,
+                            color: Color(AppColors.navy),
+                            fontWeight: FontWeight.bold),
+                        textDirection: TextDirection.rtl,
+                      ),
+                      const SizedBox(width: 6),
+                      const Icon(Icons.arrow_forward_ios,
+                          size: 12, color: Color(AppColors.navy)),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _infoRowCompact(String label, String value) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(value,
+            style: const TextStyle(fontSize: 12, color: Color(AppColors.text)),
+            textDirection: TextDirection.rtl),
+        Text(label,
+            style:
+                const TextStyle(fontSize: 11, color: Color(AppColors.muted))),
+      ],
     );
   }
 

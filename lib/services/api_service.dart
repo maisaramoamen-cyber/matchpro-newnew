@@ -361,16 +361,6 @@ class ApiService {
     }
   }
 
-  /// POST /api/baileys/start → initiate Baileys WA connection
-  static Future<Map<String, dynamic>> startBaileys() async {
-    try {
-      return await _post('/api/baileys/start', {});
-    } catch (e) {
-      if (kDebugMode) debugPrint('startBaileys error: $e');
-      return {'ok': false};
-    }
-  }
-
   // ═══════════════════════════════════════════════════════════════════════════
   // BROKERS / ANALYTICS
   // ═══════════════════════════════════════════════════════════════════════════
@@ -444,6 +434,76 @@ class ApiService {
       return res['ok'] == true || res['success'] == true;
     } catch (e) {
       if (kDebugMode) debugPrint('updateSettings error: $e');
+      return false;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // BAILEYS — WhatsApp connector
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /// GET /api/baileys/status → live connection state + qrBase64
+  static Future<Map<String, dynamic>> getBaileysStatus() async {
+    try {
+      return await _get('/api/baileys/status');
+    } catch (e) {
+      if (kDebugMode) debugPrint('getBaileysStatus error: $e');
+      return {'connected': false, 'state': 'error', 'qrAvailable': false};
+    }
+  }
+
+  /// POST /api/baileys/start → start connector (idempotent)
+  static Future<bool> startBaileys() async {
+    try {
+      final res = await _post('/api/baileys/start', {});
+      return res['ok'] == true;
+    } catch (e) {
+      if (kDebugMode) debugPrint('startBaileys error: $e');
+      return false;
+    }
+  }
+
+  /// POST /api/baileys/stop → disconnect WA
+  static Future<bool> stopBaileys() async {
+    try {
+      final res = await _post('/api/baileys/stop', {});
+      return res['ok'] == true;
+    } catch (e) {
+      if (kDebugMode) debugPrint('stopBaileys error: $e');
+      return false;
+    }
+  }
+
+  /// POST /api/baileys/reset → clear session + force new QR
+  static Future<bool> resetBaileys() async {
+    try {
+      final res = await _post('/api/baileys/reset', {});
+      return res['ok'] == true;
+    } catch (e) {
+      if (kDebugMode) debugPrint('resetBaileys error: $e');
+      return false;
+    }
+  }
+
+  /// GET /api/baileys/groups → list of linked WA groups
+  static Future<List<Map<String, dynamic>>> getBaileysGroups() async {
+    try {
+      final data = await _get('/api/baileys/groups');
+      final groups = data['groups'] as List? ?? [];
+      return groups.map((g) => g as Map<String, dynamic>).toList();
+    } catch (e) {
+      if (kDebugMode) debugPrint('getBaileysGroups error: $e');
+      return [];
+    }
+  }
+
+  /// POST /api/baileys/send-message → send WA message to phone number
+  static Future<bool> sendBaileysMessage(String to, String text) async {
+    try {
+      final res = await _post('/api/baileys/send-message', {'to': to, 'text': text});
+      return res['ok'] == true;
+    } catch (e) {
+      if (kDebugMode) debugPrint('sendBaileysMessage error: $e');
       return false;
     }
   }
