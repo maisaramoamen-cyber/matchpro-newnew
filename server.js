@@ -1,9 +1,10 @@
 /**
- * MatchPro Intelligence — Standalone Backend v1.0
+ * MatchPro Intelligence — Standalone Backend v2.0
  * ================================================
  * Self-contained: no missing deps, all routes inline
- * JWT Auth | SQLite (better-sqlite3) | Socket.IO | WA Status
+ * JWT Auth | SQLite (better-sqlite3) | Socket.IO | Baileys WA
  * SACRED Engine: Location(40) + Price(35) + Specs(25) + Recency(5) + Urgency(5)
+ * Baileys: Real multi-device WA connector — QR once, persistent session
  */
 
 import 'dotenv/config'
@@ -16,20 +17,19 @@ import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import { createHmac, timingSafeEqual } from 'crypto'
 import { existsSync, mkdirSync } from 'fs'
+import { startBaileys, stopBaileys, resetBaileys, sendMessage as baileySend, getGroups, baileysEvents, getBaileysState } from './baileys.js'
 
 const _require = createRequire(import.meta.url)
 const Database = _require('better-sqlite3')
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 // ── Config ─────────────────────────────────────────────────────────────────
-const PORT         = parseInt(process.env.PORT || '3001')
-const JWT_SECRET   = process.env.JWT_SECRET   || 'matchpro-cpi-2026-crystalpower-secure'
-const ADMIN_USER   = process.env.ADMIN_USER   || 'admin'
-const ADMIN_PASS   = process.env.ADMIN_PASSWORD || 'CPI-Admin-2026!'
-const WA_INSTANCE  = process.env.WA_INSTANCE_ID  || '7105409203'
-const WA_TOKEN     = process.env.WA_API_TOKEN    || 'c678c910865246ca90eeb3d16867b5fa12a52bb37b4944db92'
-const WA_GATEWAY   = process.env.WA_GATEWAY_URL  || 'https://7105.api.greenapi.com'
-const DB_PATH      = join(__dirname, 'data', 'matchpro.db')
+const PORT       = parseInt(process.env.PORT || '3001')
+const JWT_SECRET = process.env.JWT_SECRET    || 'matchpro-cpi-2026-crystalpower-secure'
+const ADMIN_USER = process.env.ADMIN_USER    || 'admin'
+const ADMIN_PASS = process.env.ADMIN_PASSWORD || 'CPI-Admin-2026!'
+const DB_PATH    = join(__dirname, 'data', 'matchpro.db')
+// Note: Green API vars removed — using Baileys (native WA multi-device)
 
 // ── Database Setup ─────────────────────────────────────────────────────────
 if (!existsSync(join(__dirname, 'data'))) mkdirSync(join(__dirname, 'data'), { recursive: true })
@@ -434,29 +434,67 @@ const io = new SocketIOServer(httpServer, {
 app.use(cors({ origin: '*', methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'] }))
 app.use(express.json({ limit: '5mb' }))
 
-// ── WA Status via Green API ────────────────────────────────────────────────
-let waStatusCache = { connected: false, state: 'unknown', phone: null, lastCheck: null }
-async function refreshWaStatus() {
+// ── Baileys WA events → Socket.IO ─────────────────────────────────────────
+baileysEvents.on('state_change', (state) => {
+  io.emit('wa_status', state)
+})
+
+baileysEvents.on('qr', ({ qr }) => {
+  io.emit('baileys_qr', { qr, timestamp: new Date().toISOString() })
+})
+
+baileysEvents.on('message', async (msg) => {
   try {
-    const url = `${WA_GATEWAY}/waInstance${WA_INSTANCE}/getStateInstance/${WA_TOKEN}`
-    const res = await fetch(url, { signal: AbortSignal.timeout(8000) })
-    if (res.ok) {
-      const data = await res.json()
-      const state = data.stateInstance || 'unknown'
-      waStatusCache = {
-        connected: state === 'authorized',
-        state,
-        phone: data.wid || null,
-        type: 'green_api',
-        note: 'WA via Green API',
-        lastCheck: new Date().toISOString(),
-      }
-      io.emit('wa_status', waStatusCache)
+    // Save real WA message to SQLite
+    const id = 'wa_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7)
+    const type = msg.body && /بيع|للبيع|شقة|فيلا|ارض|محل|اوفيس|تاون|دوبلكس/i.test(msg.body) ? 'supply'
+                : msg.body && /اشتري|عايز|محتاج|طلب|ابحث|أبحث/i.test(msg.body) ? 'demand'
+                : 'general'
+
+    db.prepare(`
+      INSERT OR IGNORE INTO messages(id,body,sender,sender_name,group_id,group_name,msg_type,raw_message,created_at,classified,sender_phone)
+      VALUES(?,?,?,?,?,?,?,?,?,0,?)
+    `).run(
+      id, msg.body,
+      msg.sender_phone ? msg.sender_phone + '@c.us' : 'unknown',
+      msg.sender_name || msg.sender_phone || 'Unknown',
+      msg.group_id || null,
+      msg.group_name || null,
+      type,
+      msg.body,
+      msg.created_at || new Date().toISOString(),
+      msg.sender_phone || null
+    )
+
+    // Emit real-time message event
+    io.emit('newMessage', {
+      id, body: msg.body, sender_phone: msg.sender_phone,
+      sender_name: msg.sender_name, group_id: msg.group_id,
+      msg_type: type, created_at: msg.created_at || new Date().toISOString()
+    })
+
+    // Emit updated stats
+    const stats = {
+      supply:   db.prepare('SELECT COUNT(*) c FROM supply').get().c,
+      demand:   db.prepare('SELECT COUNT(*) c FROM demand').get().c,
+      matches:  db.prepare('SELECT COUNT(*) c FROM matches').get().c,
+      messages: db.prepare('SELECT COUNT(*) c FROM messages').get().c,
+      timestamp: new Date().toISOString()
     }
-  } catch { /* silent */ }
-}
-refreshWaStatus()
-setInterval(refreshWaStatus, 60000)
+    io.emit('stats_update', stats)
+
+    // If classified supply/demand, run SACRED and emit newMatch if HOT found
+    if (type === 'supply' || type === 'demand') {
+      const matches = runSacredMatching()
+      const hotNew = matches.filter(m => m.grade === 'hot')
+      if (hotNew.length > 0) {
+        io.emit('newMatch', { count: hotNew.length, matches: hotNew.slice(0, 3), timestamp: new Date().toISOString() })
+      }
+    }
+  } catch (e) {
+    console.error('[Baileys→DB] Error saving message:', e.message)
+  }
+})
 
 // ── Routes ─────────────────────────────────────────────────────────────────
 
@@ -506,7 +544,7 @@ app.get('/api/dashboard', requireAuth, (req, res) => {
                avgScore: Math.round(avgScoreRow.a || 0), highMatches },
       demandByLocation,
       msgVolume,
-      waStatus: waStatusCache,
+      waStatus: getBaileysState(),
       timestamp: new Date().toISOString()
     })
   } catch(e) { res.status(500).json({ error: e.message }) }
@@ -682,10 +720,59 @@ app.get('/api/assets', requireAuth, (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }) }
 })
 
-// WA Status
-app.get('/api/wa/status',      requireAuth, (req, res) => res.json(waStatusCache))
-app.get('/api/baileys/status', requireAuth, (req, res) => res.json({ ...waStatusCache, type: 'baileys', note: 'Backend running locally — Baileys active on Render only' }))
-app.post('/api/baileys/start', requireAuth, (req, res) => res.json({ ok: true, message: 'Baileys auto-starts on Render. Scan QR at /baileys on Render service.', qrAvailable: false }))
+// ── WA / Baileys endpoints ─────────────────────────────────────────────────
+app.get('/api/wa/status', requireAuth, (req, res) => res.json(getBaileysState()))
+
+app.get('/api/baileys/status', requireAuth, (req, res) => res.json(getBaileysState()))
+
+app.post('/api/baileys/start', requireAuth, async (req, res) => {
+  try {
+    await startBaileys()
+    res.json({ ok: true, message: 'Baileys starting — scan QR code', state: getBaileysState() })
+  } catch(e) { res.status(500).json({ error: e.message }) }
+})
+
+app.post('/api/baileys/stop', requireAuth, async (req, res) => {
+  try {
+    await stopBaileys()
+    res.json({ ok: true, message: 'Baileys stopped', state: getBaileysState() })
+  } catch(e) { res.status(500).json({ error: e.message }) }
+})
+
+app.post('/api/baileys/reset', requireAuth, async (req, res) => {
+  try {
+    await resetBaileys()
+    res.json({ ok: true, message: 'Baileys session reset — new QR will be generated', state: getBaileysState() })
+  } catch(e) { res.status(500).json({ error: e.message }) }
+})
+
+app.get('/api/baileys/qr', requireAuth, (req, res) => {
+  const st = getBaileysState()
+  if (st.qrBase64) {
+    // Return as HTML page with embedded QR image for easy scanning
+    res.send(`<!DOCTYPE html><html><head><title>MatchPro WA QR</title><meta http-equiv="refresh" content="30"></head><body style="display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#1a1a2e;flex-direction:column"><h2 style="color:#fff;font-family:sans-serif">MatchPro WhatsApp QR</h2><img src="${st.qrBase64}" style="border-radius:16px;padding:16px;background:#fff" /><p style="color:#aaa;font-family:sans-serif;margin-top:16px">Scan with WhatsApp → Linked Devices → Link a Device</p><p style="color:#666;font-size:12px">Auto-refresh every 30s</p></body></html>`)
+  } else if (st.connected) {
+    res.json({ connected: true, phone: st.phone, message: 'Already connected — no QR needed' })
+  } else {
+    res.json({ connected: false, message: 'QR not yet generated — Baileys may still be initializing', state: st.state })
+  }
+})
+
+app.get('/api/baileys/groups', requireAuth, async (req, res) => {
+  try {
+    const groups = await getGroups()
+    res.json({ ok: true, count: groups.length, groups })
+  } catch(e) { res.status(500).json({ error: e.message }) }
+})
+
+app.post('/api/baileys/send-message', requireAuth, async (req, res) => {
+  try {
+    const { to, text } = req.body || {}
+    if (!to || !text) return res.status(400).json({ error: '`to` (phone number) and `text` are required' })
+    await baileySend(to, text)
+    res.json({ ok: true, message: 'Message sent', to, timestamp: new Date().toISOString() })
+  } catch(e) { res.status(500).json({ error: e.message }) }
+})
 
 // Brokers
 app.get('/api/brokers', requireAuth, (req, res) => {
@@ -775,7 +862,7 @@ setInterval(() => {
 }, 30000)
 
 // ── Start ─────────────────────────────────────────────────────────────────
-httpServer.listen(PORT, '0.0.0.0', () => {
+httpServer.listen(PORT, '0.0.0.0', async () => {
   const counts = {
     supply:   db.prepare('SELECT COUNT(*) c FROM supply').get().c,
     demand:   db.prepare('SELECT COUNT(*) c FROM demand').get().c,
@@ -783,7 +870,7 @@ httpServer.listen(PORT, '0.0.0.0', () => {
     messages: db.prepare('SELECT COUNT(*) c FROM messages').get().c,
     brokers:  db.prepare('SELECT COUNT(*) c FROM brokers').get().c,
   }
-  console.log(`\n🚀 MatchPro Backend v1.0 — PORT ${PORT}`)
+  console.log(`\n🚀 MatchPro Backend v2.0 — PORT ${PORT}`)
   console.log(`   SQLite:    ✅ ${DB_PATH}`)
   console.log(`   Supply:    ${counts.supply} records`)
   console.log(`   Demand:    ${counts.demand} records`)
@@ -791,8 +878,18 @@ httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`   Matches:   ${counts.matches} records`)
   console.log(`   Brokers:   ${counts.brokers} records`)
   console.log(`   Socket.IO: ✅ enabled`)
-  console.log(`   WA:        ${waStatusCache.connected ? '✅ authorized' : '⏳ checking...'}`)
-  console.log(`\n   Health:   http://localhost:${PORT}/health\n`)
+  console.log(`   Baileys:   🔄 starting...`)
+  console.log(`\n   Health:   http://localhost:${PORT}/health`)
+  console.log(`   QR Page:  http://localhost:${PORT}/api/baileys/qr (after auth)\n`)
+
+  // Auto-start Baileys WA connector
+  try {
+    await startBaileys()
+    console.log('[Baileys] ✅ Initialized — check logs for QR or connected state')
+  } catch(e) {
+    console.error('[Baileys] ⚠️  Failed to start:', e.message)
+    console.log('[Baileys] POST /api/baileys/start to retry')
+  }
 })
 
 export default app
