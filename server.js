@@ -359,7 +359,24 @@ function runSacredMatching() {
     score += urgencyScore
     breakdown.urgency = urgencyScore
 
+    const rawScore = score
     score = Math.min(Math.round(score), 100)
+
+    // Normalize breakdown so components always sum exactly to capped score
+    if (rawScore > score && rawScore > 0) {
+      const ratio = score / rawScore
+      for (const k of Object.keys(breakdown)) {
+        breakdown[k] = Math.round(breakdown[k] * ratio)
+      }
+      // Fix any rounding drift: adjust largest component to absorb remainder
+      const breakdownSum = Object.values(breakdown).reduce((a, b) => a + b, 0)
+      const drift = score - breakdownSum
+      if (drift !== 0) {
+        const largestKey = Object.keys(breakdown).reduce((a, b) => breakdown[a] >= breakdown[b] ? a : b)
+        breakdown[largestKey] += drift
+      }
+    }
+
     const grade = score >= 85 ? 'hot' : score >= 65 ? 'warm' : 'cold'
 
     return { score, grade, breakdown }
