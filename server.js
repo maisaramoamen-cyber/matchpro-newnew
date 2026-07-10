@@ -439,8 +439,9 @@ baileysEvents.on('state_change', (state) => {
   io.emit('wa_status', state)
 })
 
-baileysEvents.on('qr', ({ qr }) => {
-  io.emit('baileys_qr', { qr, timestamp: new Date().toISOString() })
+baileysEvents.on('qr', ({ qr, qrBase64 }) => {
+  // Send both raw QR string and base64 PNG so Flutter can render immediately
+  io.emit('baileys_qr', { qr, qrBase64, timestamp: new Date().toISOString() })
 })
 
 // ── Monitored groups helper ────────────────────────────────────────────────

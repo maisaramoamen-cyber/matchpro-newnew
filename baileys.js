@@ -21,8 +21,9 @@ import pino from 'pino'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const AUTH_DIR   = join(__dirname, 'data', 'baileys_auth')
-const RECONNECT_DELAY_MS = 5000
-const MAX_RECONNECTS     = 10
+const RECONNECT_DELAY_MS  = 5000
+const MAX_RECONNECTS      = 50   // stays alive ~50 QR cycles before giving up
+const MAX_DELAY_MS        = 60000 // cap backoff at 60s
 
 // Ensure auth dir exists
 if (!existsSync(AUTH_DIR)) mkdirSync(AUTH_DIR, { recursive: true })
@@ -168,7 +169,8 @@ async function connect() {
         } catch { _qrBase64 = null }
 
         console.log('[Baileys] 📱 QR ready — scan at /api/baileys/qr')
-        baileysEvents.emit('qr', qr)
+        // Emit full object so server.js can forward qrBase64 to Flutter via Socket.IO
+        baileysEvents.emit('qr', { qr, qrBase64: _qrBase64 })
         baileysEvents.emit('state_change', getBaileysState())
       }
 
@@ -210,8 +212,8 @@ async function connect() {
 
         if (shouldReconnect && _reconnectCount < MAX_RECONNECTS) {
           _reconnectCount++
-          const delay = RECONNECT_DELAY_MS * Math.min(_reconnectCount, 5)
-          console.log(`[Baileys] ♻️  Reconnecting in ${delay}ms (attempt ${_reconnectCount}/${MAX_RECONNECTS})`)
+          const delay = Math.min(RECONNECT_DELAY_MS * Math.min(_reconnectCount, 5), MAX_DELAY_MS)
+          console.log(`[Baileys] ♻️  Reconnecting in ${Math.round(delay/1000)}s (attempt ${_reconnectCount}/${MAX_RECONNECTS})`)
           setTimeout(connect, delay)
         }
       }
