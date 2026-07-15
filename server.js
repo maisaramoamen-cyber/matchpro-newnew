@@ -746,6 +746,44 @@ app.post('/api/reports/broker-weekly', requireAuth, async (req, res) => {
   }
 })
 
+// Deal Sheet PDF — POST /api/deal-sheet/:asset_id
+// Generates a branded A4 PDF for any CPI asset or WhatsApp supply listing.
+// Returns: { ok, fileName, path, downloadUrl, asset, sizeKB, timestamp }
+app.post('/api/deal-sheet/:asset_id', requireAuth, async (req, res) => {
+  const { asset_id } = req.params
+  try {
+    const { generate } = _require('./automations/deal_sheet_generator.cjs')
+    const result = await generate(asset_id)
+    if (!result.ok) return res.status(404).json({ ok: false, error: result.error })
+    res.json({
+      ok:          true,
+      fileName:    result.fileName,
+      path:        result.filePath,
+      downloadUrl: `/api/deal-sheet/download/${result.fileName}`,
+      asset:       result.asset,
+      sizeKB:      result.sizeKB,
+      timestamp:   result.timestamp,
+    })
+  } catch(e) {
+    console.error(`[/api/deal-sheet/${asset_id}]`, e.message)
+    res.status(500).json({ ok: false, error: e.message })
+  }
+})
+
+// Deal Sheet download — GET /api/deal-sheet/download/:filename
+app.get('/api/deal-sheet/download/:filename', requireAuth, (req, res) => {
+  const { filename } = req.params
+  // Sanitize — only allow expected filename pattern
+  if (!/^DealSheet_[\w-]+_\d{4}-\d{2}-\d{2}\.pdf$/.test(filename)) {
+    return res.status(400).json({ ok: false, error: 'Invalid filename' })
+  }
+  const filePath = join(__dirname, 'reports', 'deal_sheets', filename)
+  if (!existsSync(filePath)) return res.status(404).json({ ok: false, error: 'File not found' })
+  res.setHeader('Content-Type', 'application/pdf')
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+  res.sendFile(filePath)
+})
+
 // Pipeline
 app.get('/api/pipeline', requireAuth, (req, res) => {
   try {
