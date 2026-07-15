@@ -4,3 +4,6 @@ data/*.db-shm
 data/*.db-wal
 .env
 *.log
+reports/broker_weekly/*.xlsx
+node_modules/
+*.log

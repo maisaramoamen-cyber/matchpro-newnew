@@ -725,6 +725,27 @@ app.get('/api/reports/download/:filename', requireAuth, (req, res) => {
   res.json({ ok: true, url: `/api/reports/download/${req.params.filename}`, message: 'رابط التنزيل جاهز' })
 })
 
+// Broker Weekly Report — on-demand trigger
+app.post('/api/reports/broker-weekly', requireAuth, async (req, res) => {
+  try {
+    const { run } = _require('./automations/broker_weekly_report.cjs')
+    const result = await run()
+    if (!result.ok) return res.status(500).json({ error: result.error || 'Report generation failed' })
+    res.json({
+      ok: true,
+      file: result.fileName,
+      path: result.filePath,
+      dateStr: result.dateStr,
+      stats: result.stats,
+      email: result.emailResult,
+      timestamp: new Date().toISOString()
+    })
+  } catch(e) {
+    console.error('[/api/reports/broker-weekly]', e.message)
+    res.status(500).json({ ok: false, error: e.message })
+  }
+})
+
 // Pipeline
 app.get('/api/pipeline', requireAuth, (req, res) => {
   try {
